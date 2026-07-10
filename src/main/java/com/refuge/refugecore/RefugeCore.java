@@ -1,119 +1,124 @@
 package com.refuge.refugecore;
 
-import org.slf4j.Logger;
+import org.slf4j.Logger;                                     // 日志接口（SLF4J）
+import com.mojang.logging.LogUtils;                         // NeoForge 提供的日志工厂
 
-import com.mojang.logging.LogUtils;
+import net.minecraft.commands.Commands;                     // 构建指令树的构建器
+import net.minecraft.core.registries.Registries;            // 注册表（维度等在此登记）
+import net.minecraft.network.chat.Component;                // 聊天栏可显示富文本
+import net.minecraft.resources.ResourceKey;                 // 资源「键」，用于唯一定位维度
+import net.minecraft.resources.ResourceLocation;            // 资源位置（命名空间:路径）
+import net.minecraft.server.level.ServerLevel;              // 服务端维度世界
+import net.minecraft.server.level.ServerPlayer;             // 服务端玩家
+import net.minecraft.world.level.Level;                     // 维度世界基类（HOME_KEY 的类型参数）
+import net.neoforged.bus.api.IEventBus;                     // 模组事件总线
+import net.neoforged.bus.api.SubscribeEvent;                // 标记某方法为事件监听器
+import net.neoforged.fml.common.Mod;                        // 声明这是模组主类
+import net.neoforged.fml.config.ModConfig;                  // 模组配置类型
+import net.neoforged.fml.ModContainer;                      // 模组容器（可注册配置等）
+import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent; // 公共初始化事件
+import net.neoforged.neoforge.common.NeoForge;             // NeoForge 全局事件总线
+import net.neoforged.neoforge.event.RegisterCommandsEvent; // 指令注册事件
+import net.neoforged.neoforge.event.server.ServerStartingEvent; // 服务端启动事件
+import net.minecraft.world.entity.Mob;                      // 生物基类（怪物+动物都继承它）
+import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent; // 实体进入某维度事件
+import net.neoforged.neoforge.event.tick.LevelTickEvent;    // 维度每 tick 事件
 
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.core.registries.Registries;
-import net.minecraft.network.chat.Component;
-import net.minecraft.world.food.FoodProperties;
-import net.minecraft.world.item.BlockItem;
-import net.minecraft.world.item.CreativeModeTab;
-import net.minecraft.world.item.CreativeModeTabs;
-import net.minecraft.world.item.Item;
-import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.state.BlockBehaviour;
-import net.minecraft.world.level.material.MapColor;
-import net.neoforged.bus.api.IEventBus;
-import net.neoforged.bus.api.SubscribeEvent;
-import net.neoforged.fml.common.Mod;
-import net.neoforged.fml.config.ModConfig;
-import net.neoforged.fml.ModContainer;
-import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
-import net.neoforged.neoforge.common.NeoForge;
-import net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent;
-import net.neoforged.neoforge.event.server.ServerStartingEvent;
-import net.neoforged.neoforge.registries.DeferredBlock;
-import net.neoforged.neoforge.registries.DeferredHolder;
-import net.neoforged.neoforge.registries.DeferredItem;
-import net.neoforged.neoforge.registries.DeferredRegister;
-
-// The value here should match an entry in the META-INF/neoforge.mods.toml file
+// @Mod 告诉 NeoForge：这是模组入口，MODID 必须和 neoforge.mods.toml 里的 modId 一致
 @Mod(RefugeCore.MODID)
 public class RefugeCore {
-    // Define mod id in a common place for everything to reference
+    // 模组 ID（命名空间）。数据包、指令、资源都以此前缀。
     public static final String MODID = "refugecore";
-    // Directly reference a slf4j logger
+    // 全局日志器，各处在用 LOGGER.info(...) / LOGGER.error(...)
     public static final Logger LOGGER = LogUtils.getLogger();
-    // Create a Deferred Register to hold Blocks which will all be registered under the "refugecore" namespace
-    public static final DeferredRegister.Blocks BLOCKS = DeferredRegister.createBlocks(MODID);
-    // Create a Deferred Register to hold Items which will all be registered under the "refugecore" namespace
-    public static final DeferredRegister.Items ITEMS = DeferredRegister.createItems(MODID);
-    // Create a Deferred Register to hold CreativeModeTabs which will all be registered under the "refugecore" namespace
-    public static final DeferredRegister<CreativeModeTab> CREATIVE_MODE_TABS = DeferredRegister.create(Registries.CREATIVE_MODE_TAB, MODID);
 
-    // Creates a new Block with the id "refugecore:example_block", combining the namespace and path
-    public static final DeferredBlock<Block> EXAMPLE_BLOCK = BLOCKS.registerSimpleBlock("example_block", BlockBehaviour.Properties.of().mapColor(MapColor.STONE));
-    // Creates a new BlockItem with the id "refugecore:example_block", combining the namespace and path
-    public static final DeferredItem<BlockItem> EXAMPLE_BLOCK_ITEM = ITEMS.registerSimpleBlockItem("example_block", EXAMPLE_BLOCK);
+    // 家园维度的「键」。维度本身由数据包 data/refugecore/dimension/home.json 定义，
+    // 这里只是 Java 侧引用它用的「钥匙」。
+    public static final ResourceKey<Level> HOME_KEY = ResourceKey.create(Registries.DIMENSION,
+            ResourceLocation.fromNamespaceAndPath(MODID, "home"));
 
-    // Creates a new food item with the id "refugecore:example_id", nutrition 1 and saturation 2
-    public static final DeferredItem<Item> EXAMPLE_ITEM = ITEMS.registerSimpleItem("example_item", new Item.Properties().food(new FoodProperties.Builder()
-            .alwaysEdible().nutrition(1).saturationModifier(2f).build()));
-
-    // Creates a creative tab with the id "refugecore:example_tab" for the example item, that is placed after the combat tab
-    public static final DeferredHolder<CreativeModeTab, CreativeModeTab> EXAMPLE_TAB = CREATIVE_MODE_TABS.register("example_tab", () -> CreativeModeTab.builder()
-            .title(Component.translatable("itemGroup.refugecore")) //The language key for the title of your CreativeModeTab
-            .withTabsBefore(CreativeModeTabs.COMBAT)
-            .icon(() -> EXAMPLE_ITEM.get().getDefaultInstance())
-            .displayItems((parameters, output) -> {
-                output.accept(EXAMPLE_ITEM.get()); // Add the example item to the tab. For your own tabs, this method is preferred over the event
-            }).build());
-
-    // The constructor for the mod class is the first code that is run when your mod is loaded.
-    // FML will recognize some parameter types like IEventBus or ModContainer and pass them in automatically.
+    // 模组主类构造器：模组加载时第一个执行。
+    // FML 会按类型自动注入 IEventBus（模组总线）和 ModContainer（模组容器）。
     public RefugeCore(IEventBus modEventBus, ModContainer modContainer) {
-
+        // 注册初始化监听：commonSetup 会在模组初始化阶段被调用
         modEventBus.addListener(this::commonSetup);
 
-        // Register the commonSetup method for modloading
-        modEventBus.addListener(this::commonSetup);
-
-        // Register the Deferred Register to the mod event bus so blocks get registered
-        BLOCKS.register(modEventBus);
-        // Register the Deferred Register to the mod event bus so items get registered
-        ITEMS.register(modEventBus);
-        // Register the Deferred Register to the mod event bus so tabs get registered
-        CREATIVE_MODE_TABS.register(modEventBus);
-
-        // Register ourselves for server and other game events we are interested in.
-        // Note that this is necessary if and only if we want *this* class (refugecore) to respond directly to events.
-        // Do not add this line if there are no @SubscribeEvent-annotated functions in this class, like onServerStarting() below.
+        // 把自己注册到 NeoForge 全局事件总线，下面 @SubscribeEvent 方法才会收到游戏事件
         NeoForge.EVENT_BUS.register(this);
 
-        // Register the item to a creative tab
-        modEventBus.addListener(this::addCreative);
-
-        // Register our mod's ModConfigSpec so that FML can create and load the config file for us
+        // 注册模组配置文件（Config.SPEC 来自 Config.java，对应 common 类型配置）
         modContainer.registerConfig(ModConfig.Type.COMMON, Config.SPEC);
     }
 
+    // 公共初始化（客户端+服务端都会跑一次），这里只打日志
     private void commonSetup(FMLCommonSetupEvent event) {
-        // Some common setup code
-        LOGGER.info("RefugeCore loaded");
-
-        if (Config.LOG_DIRT_BLOCK.getAsBoolean()) {
-            LOGGER.info("DIRT BLOCK >> {}", BuiltInRegistries.BLOCK.getKey(Blocks.DIRT));
-        }
-
-        LOGGER.info("{}{}", Config.MAGIC_NUMBER_INTRODUCTION.get(), Config.MAGIC_NUMBER.getAsInt());
-
-        Config.ITEM_STRINGS.get().forEach((item) -> LOGGER.info("ITEM >> {}", item));
+        LOGGER.info("RefugeCore common setup complete");
     }
 
-    // Add the example block item to the building blocks tab
-    private void addCreative(BuildCreativeModeTabContentsEvent event) {
-        if (event.getTabKey() == CreativeModeTabs.BUILDING_BLOCKS) {
-            event.accept(EXAMPLE_BLOCK_ITEM);
-        }
-    }
-
-    // You can use SubscribeEvent and let the Event Bus discover methods to call
+    // 服务端启动时：加载地块分配表（从 plots.json 读回内存）
     @SubscribeEvent
     public void onServerStarting(ServerStartingEvent event) {
-        // Do something when the server starts
-        LOGGER.info("RefugeCore server starting");
+        PlotManager.init(event.getServer());                // 用当前服务端对象初始化 PlotManager
+    }
+
+    // 注册指令：/refuge home
+    @SubscribeEvent
+    public void onRegisterCommands(RegisterCommandsEvent event) {
+        event.getDispatcher().register(Commands.literal("refuge")          // 一级指令 /refuge
+                .then(Commands.literal("home").executes(ctx -> {           // 子指令 /refuge home
+                    ServerPlayer player = ctx.getSource().getPlayer();     // 取执行者（玩家）
+                    if (player == null) return 0;                          // 非玩家（如命令方块）忽略
+                    handleHome(player);                                    // 交给核心处理逻辑
+                    return 1;                                             // 指令执行成功
+                }))
+        );
+    }
+
+    // 取消家园维度里的所有生物生成（玩家不是 Mob，不受影响）
+    @SubscribeEvent
+    public void onEntityJoin(EntityJoinLevelEvent event) {
+        // 进入的是「生物」且所在维度是家园维度 -> 取消这次进入（即不生成）
+        if (event.getEntity() instanceof Mob && event.getLevel().dimension() == HOME_KEY) {
+            event.setCanceled(true);
+        }
+    }
+
+    // 把家园维度的时间锁定在正午（6000 tick）
+    @SubscribeEvent
+    public void onLevelTick(LevelTickEvent.Post event) {
+        // 仅家园维度 + 且是服务端维度（避免客户端重复处理）
+        if (event.getLevel().dimension() == HOME_KEY && event.getLevel() instanceof ServerLevel sl) {
+            sl.setDayTime(6000L);                              // 6000 = 正午；每 tick 重写 -> 恒定白天
+        }
+    }
+
+    // 核心流程：进入/领取家园地块并传送
+    private void handleHome(ServerPlayer player) {
+        PlotManager mgr = PlotManager.get();                 // 取地块管理器单例
+        if (mgr == null) {                                   // 极端情况：管理器未初始化
+            player.sendSystemMessage(Component.literal("§c地块系统未就绪"));
+            return;
+        }
+
+        boolean isNew = !mgr.has(player.getUUID());          // 是否首次（之前没地块）
+        int[] ij = mgr.getOrAssign(player.getUUID());        // 取或分配地块坐标 [i,j]
+        int i = ij[0], j = ij[1];                            // 拆出 i, j
+
+        ServerLevel home = player.server.getLevel(HOME_KEY); // 拿家园维度的服务端世界
+        if (home == null) {                                  // 维度还没加载（极旧世界/异常）
+            player.sendSystemMessage(Component.literal("§c家园维度尚未加载，请先执行 /execute in refugecore:home run tp ~ ~ ~ 进入一次"));
+            return;
+        }
+
+        // 计算传送目标：地块中心，y=5（落在地面上方），朝向/俯仰角 0
+        double x = PlotManager.centerX(i) + 0.5;             // +0.5 落在方块中心而非角上
+        double z = PlotManager.centerZ(j) + 0.5;
+        player.teleportTo(home, x, 5, z, 0f, 0f);            // 执行跨维度传送
+
+        if (isNew) {                                         // 仅首次：生成边框+模板
+            PlotManager.buildPlot(home, i, j);
+        }
+        // 提示玩家传送成功及地块坐标
+        player.sendSystemMessage(Component.literal("§a已传送到你的家园地块 (" + i + ", " + j + ")"));
     }
 }
