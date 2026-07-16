@@ -1,5 +1,6 @@
 package com.refuge.refugecore;
 
+import net.minecraft.core.BlockPos;
 import org.slf4j.Logger;                                     // 日志接口（SLF4J）
 import com.mojang.logging.LogUtils;                         // NeoForge 提供的日志工厂
 
@@ -22,7 +23,9 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent; // 指令注册事件
 import net.neoforged.neoforge.event.server.ServerStartingEvent; // 服务端启动事件
 import net.minecraft.world.entity.Mob;                      // 生物基类（怪物+动物都继承它）
 import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent; // 实体进入某维度事件
-import net.neoforged.neoforge.event.tick.LevelTickEvent;    // 维度每 tick 事件
+import net.neoforged.neoforge.event.tick.LevelTickEvent;
+
+import java.util.UUID;
 
 // @Mod 告诉 NeoForge：这是模组入口，MODID 必须和 neoforge.mods.toml 里的 modId 一致
 @Mod(RefugeCore.MODID)
@@ -58,12 +61,14 @@ public class RefugeCore {
     // 服务端启动时：加载地块分配表（从 plots.json 读回内存）
     @SubscribeEvent
     public void onServerStarting(ServerStartingEvent event) {
-        PlotManager.init(event.getServer());                // 用当前服务端对象初始化 PlotManager
+        PlotManager.init(event.getServer());
+        ReturnPositionManager.init(event.getServer());
     }
 
     // 注册指令：/refuge home
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
+
         event.getDispatcher().register(Commands.literal("refuge")          // 一级指令 /refuge
                 .then(Commands.literal("home").executes(ctx -> {           // 子指令 /refuge home
                     ServerPlayer player = ctx.getSource().getPlayer();     // 取执行者（玩家）
@@ -72,6 +77,40 @@ public class RefugeCore {
                     return 1;                                             // 指令执行成功
                 }))
         );
+
+        event.getDispatcher().register(Commands.literal("refuge")
+                .then(Commands.literal("world").executes(ctx -> {
+                    ServerPlayer player = ctx.getSource().getPlayer();
+                    if (player == null) return 0;
+                    handleWorld(player);
+                    return 1;
+                }))
+        );
+    }
+
+    private void handleWorld(ServerPlayer player) {
+        if (player.level().dimension() != HOME_KEY) {
+            player.sendSystemMessage(Component.literal("§c你当前不在家园维度"));
+            return;
+        }
+
+        ServerLevel overworld = player.server.getLevel(Level.OVERWORLD);
+        if (overworld == null) {
+            player.sendSystemMessage(Component.literal("§c主世界未加载"));
+            return;
+        }
+
+        ReturnPositionManager rpm = ReturnPositionManager.get();
+        double[] saved = (rpm != null) ? rpm.removePosition(player.getUUID()) : null;
+
+        if (saved != null) {
+            player.teleportTo(overworld, saved[0], saved[1], saved[2], (float) saved[3], (float) saved[4]);
+            player.sendSystemMessage(Component.literal("§a已返回主世界"));
+        } else {
+            BlockPos spawn = overworld.getSharedSpawnPos();
+            player.teleportTo(overworld, spawn.getX() + 0.5, spawn.getY(), spawn.getZ() + 0.5, 0f, 0f);
+            player.sendSystemMessage(Component.literal("§a已返回主世界出生点"));
+        }
     }
 
     // 取消家园维度里的所有生物生成（玩家不是 Mob，不受影响）
@@ -94,18 +133,27 @@ public class RefugeCore {
 
     // 核心流程：进入/领取家园地块并传送
     private void handleHome(ServerPlayer player) {
-        PlotManager mgr = PlotManager.get();                 // 取地块管理器单例
-        if (mgr == null) {                                   // 极端情况：管理器未初始化
+        PlotManager mgr = PlotManager.get();
+        if (mgr == null) {
             player.sendSystemMessage(Component.literal("§c地块系统未就绪"));
             return;
         }
 
-        boolean isNew = !mgr.has(player.getUUID());          // 是否首次（之前没地块）
-        int[] ij = mgr.getOrAssign(player.getUUID());        // 取或分配地块坐标 [i,j]
-        int i = ij[0], j = ij[1];                            // 拆出 i, j
+        if (player.level().dimension() == Level.OVERWORLD) {
+            ReturnPositionManager rpm = ReturnPositionManager.get();
+            if (rpm != null) {
+                rpm.savePosition(player.getUUID(),
+                        player.getX(), player.getY(), player.getZ(),
+                        player.getYRot(), player.getXRot());
+            }
+        }
 
-        ServerLevel home = player.server.getLevel(HOME_KEY); // 拿家园维度的服务端世界
-        if (home == null) {                                  // 维度还没加载（极旧世界/异常）
+        boolean isNew = !mgr.has(player.getUUID());
+        int[] ij = mgr.getOrAssign(player.getUUID());
+        int i = ij[0], j = ij[1];
+
+        ServerLevel home = player.server.getLevel(HOME_KEY);
+        if (home == null) {
             player.sendSystemMessage(Component.literal("§c家园维度尚未加载，请先执行 /execute in refugecore:home run tp ~ ~ ~ 进入一次"));
             return;
         }
@@ -113,9 +161,9 @@ public class RefugeCore {
         // 计算传送目标：地块中心，y=5（落在地面上方），朝向/俯仰角 0
         double x = PlotManager.centerX(i) + 0.5;             // +0.5 落在方块中心而非角上
         double z = PlotManager.centerZ(j) + 0.5;
-        player.teleportTo(home, x, 5, z, 0f, 0f);            // 执行跨维度传送
+        player.teleportTo(home, x, 5, z, 0f, 0f);
 
-        if (isNew) {                                         // 仅首次：生成边框+模板
+        if (isNew) {
             PlotManager.buildPlot(home, i, j);
         }
         // 提示玩家传送成功及地块坐标
